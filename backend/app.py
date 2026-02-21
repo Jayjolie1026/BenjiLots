@@ -48,6 +48,81 @@ def bbox_from_point_radius_ll(lon: float, lat: float, radius_m: float) -> BBoxLL
     return bbox_3857_to_bbox_ll(bbox_3857)
 
 
+import os
+import numpy as np
+from PIL import Image
+
+import torch
+import torch.nn.functional as F
+from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
+
+# --- load once at startup ---
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+feature_extractor = SegformerImageProcessor(do_resize=True, size=(256, 256))
+
+model = SegformerForSemanticSegmentation.from_pretrained("C:\\Users\\jayjo\\Downloads\\GT_Hackathon\\segformer-parkseg12k").to(device)
+model.eval()
+
+
+
+
+import numpy as np
+from PIL import Image
+import torch
+import torch.nn.functional as F
+
+# set this once (IMPORTANT)
+PARKING_CLASS_ID = 1  # change if your label mapping uses a different id
+
+def run_segformer_argmax_mask(pil_img: Image.Image, size_px=None):
+    """
+    Returns:
+      pred_class: (H,W) uint8 class ids
+      parking_mask: (H,W) uint8 0/255 for PARKING_CLASS_ID
+    """
+    pil_img = pil_img.convert("RGB")
+    orig_w, orig_h = pil_img.size
+
+    encoded = feature_extractor(pil_img, return_tensors="pt")
+    pixel_values = encoded["pixel_values"].to(device)
+
+    with torch.no_grad():
+        outputs = model(pixel_values=pixel_values)
+        logits = outputs.logits  # [1, C, h, w]
+
+    # upsample logits back to target resolution
+    if size_px is None:
+        target_h, target_w = orig_h, orig_w
+    else:
+        target_w, target_h = size_px  # (W,H)
+
+    logits_up = F.interpolate(
+        logits, size=(target_h, target_w),
+        mode="bilinear", align_corners=False
+    )
+
+    pred_class = torch.argmax(logits_up, dim=1)[0].cpu().numpy().astype(np.uint8)  # (H,W)
+    parking_mask = (pred_class == PARKING_CLASS_ID).astype(np.uint8) * 255
+
+    return pred_class, parking_mask
+
+
+def save_mask_and_overlay_argmax(img_path: str, mask_path: str, overlay_path: str, alpha=0.4):
+    img = Image.open(img_path).convert("RGB")
+    mask = run_segformer_sliding_window(img, patch_size=256, stride=128)
+    coverage = float((mask > 0).mean())
+    print(f"{img_path} parking_coverage={coverage:.4f}")
+
+    Image.fromarray(mask).save(mask_path)
+
+    # overlay red where mask is 255
+    mask_l = Image.fromarray(mask).convert("L")
+    red = Image.new("RGB", img.size, (255, 0, 0))
+    overlay = Image.composite(red, img, mask_l)
+    blended = Image.blend(img, overlay, alpha=alpha)
+    blended.save(overlay_path)
+
 # ----------------------------
 # Grid / tiling
 # ----------------------------
@@ -82,6 +157,40 @@ def bbox_ll_to_bbox_3857(bbox: BBoxLL) -> Tuple[float, float, float, float]:
     x1, y1 = lonlat_to_webmerc(max_lon, max_lat)
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
+import numpy as np
+from PIL import Image
+import torch
+import torch.nn.functional as F
+
+def run_segformer_sliding_window(pil_img, patch_size=256, stride=256):
+    img = np.array(pil_img.convert("RGB"))
+    H, W, _ = img.shape
+    out_mask = np.zeros((H, W), dtype=np.uint8)
+
+    ys = list(range(0, max(H - patch_size + 1, 1), stride))
+    xs = list(range(0, max(W - patch_size + 1, 1), stride))
+    if ys[-1] != H - patch_size: ys.append(H - patch_size)
+    if xs[-1] != W - patch_size: xs.append(W - patch_size)
+
+    for y0 in ys:
+        for x0 in xs:
+            patch = img[y0:y0+patch_size, x0:x0+patch_size]
+            patch_pil = Image.fromarray(patch)
+
+            encoded = feature_extractor(patch_pil, return_tensors="pt")
+            pixel_values = encoded["pixel_values"].to(device)
+
+            with torch.no_grad():
+                logits = model(pixel_values=pixel_values).logits
+
+            logits_up = F.interpolate(logits, size=(patch_size, patch_size),
+                                      mode="bilinear", align_corners=False)
+            pred_class = torch.argmax(logits_up, dim=1)[0].cpu().numpy().astype(np.uint8)
+            pred = (pred_class == PARKING_CLASS_ID).astype(np.uint8) * 255
+
+            out_mask[y0:y0+patch_size, x0:x0+patch_size] = pred
+
+    return out_mask
 
 # ----------------------------
 # ArcGIS export downloader
@@ -175,7 +284,59 @@ def api_imagery():
 def serve_export(job_id, filename):
     return send_from_directory(EXPORT_ROOT / job_id, filename)
 
+from flask import jsonify, request
 
+
+
+
+@app.route("/api/segment", methods=["POST"])
+def api_segment():
+    data = request.get_json(silent=True) or {}
+
+    job_id = data.get("job_id")
+    if not job_id:
+        return jsonify({
+            "error": "Missing job_id. Call /api/imagery first, then POST {job_id} to /api/segment."
+        }), 400
+
+    return _segment_job(job_id)
+
+
+@app.route("/api/segment/<job_id>", methods=["GET"])
+def api_segment_get(job_id):
+    # easier testing in browser: GET /api/segment/<job_id>
+    return _segment_job(job_id)
+
+
+def _segment_job(job_id: str):
+    job_dir = EXPORT_ROOT / job_id
+    if not job_dir.exists():
+        return jsonify({"error": f"job_id not found: {job_id}"}), 404
+
+    tiles = sorted(job_dir.glob("cell_*.png"))
+    tiles = [p for p in tiles if not p.name.endswith("_overlay.png") and not p.name.endswith("_mask.png")]
+
+    results = []
+    for p in tiles:
+        stem = p.stem
+        mask_file = job_dir / f"{stem}_mask.png"
+        overlay_file = job_dir / f"{stem}_overlay.png"
+
+        if not (mask_file.exists() and overlay_file.exists()):
+            save_mask_and_overlay_argmax(
+                img_path=str(p),
+                mask_path=str(mask_file),
+                overlay_path=str(overlay_file),
+                alpha=0.4
+            )
+
+        results.append({
+            "image_url": f"/exports/{job_id}/{p.name}",
+            "mask_url": f"/exports/{job_id}/{mask_file.name}",
+            "overlay_url": f"/exports/{job_id}/{overlay_file.name}",
+        })
+
+    return jsonify({"job_id": job_id, "count": len(results), "results": results})
 if __name__ == "__main__":
     # Run backend: python app.py
     app.run(host="0.0.0.0", port=5000, debug=True)
