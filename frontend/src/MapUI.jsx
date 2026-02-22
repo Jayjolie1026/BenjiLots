@@ -8,21 +8,6 @@ const PRIMARY = "#00D4FF";
 const PRIMARY_DIM = "rgba(0, 212, 255, 0.18)";
 const ACCENT = "#FF6B35";
 
-const CITIES = {
-  nashville: {
-    label: "Nashville",
-    abbr: "BNA",
-    center: [-86.7816, 36.1627],
-    zoom: 12,
-  },
-  cookeville: {
-    label: "Cookeville",
-    abbr: "CVL",
-    center: [-85.5016, 36.1628],
-    zoom: 13,
-  },
-};
-
 const SOURCE_ID = "radius-source";
 const FILL_LAYER_ID = "radius-fill";
 const LINE_LAYER_ID = "radius-outline";
@@ -32,17 +17,66 @@ const CROSSHAIR_SOURCE_ID = "crosshair-source";
 const CROSSHAIR_LAYER_H = "crosshair-h";
 const CROSSHAIR_LAYER_V = "crosshair-v";
 
-const backendBase = "http://localhost:5000"; // change if deployed
+const backendBase = "http://localhost:5000"; 
 
-function makeCircleGeoJSON(centerLngLat, radiusMeters) {
+const css = `
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.city-btn:hover {
+  background: rgba(0, 212, 255, 0.08) !important;
+  color: rgba(0, 212, 255, 0.8) !important;
+}
+.radius-slider::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+}
+.maplibregl-ctrl-top-right {
+  top: 16px !important;
+  right: 16px !important;
+}
+.maplibregl-ctrl button {
+  background-color: rgba(4, 8, 12, 0.92) !important;
+  border-color: rgba(0, 212, 255, 0.25) !important;
+}
+.maplibregl-ctrl button span {
+  filter: invert(1) !important;
+}
+`;
+
+const CITIES = 
+{
+  nashville: 
+  {
+    label: "Nashville",
+    abbr: "BNA",
+    center: [-86.7816, 36.1627],
+    zoom: 12,
+  },
+  cookeville:
+  {
+    label: "Cookeville",
+    abbr: "CVL",
+    center: [-85.5016, 36.1628],
+    zoom: 13,
+  },
+};
+
+
+function makeCircleGeoJSON(centerLngLat, radiusMeters) 
+{
   const [lng, lat] = centerLngLat;
-  return turf.circle([lng, lat], radiusMeters / 1000, {
+  return turf.circle([lng, lat], radiusMeters / 1000, 
+  {
     steps: 128,
     units: "kilometers",
   });
 }
 
-function makeCrosshair(centerLngLat, radiusMeters) {
+
+function makeCrosshair(centerLngLat, radiusMeters) 
+{
   const [lng, lat] = centerLngLat;
   const offset = (radiusMeters / 1000 / 111.32) * 0.35;
   return {
@@ -51,7 +85,9 @@ function makeCrosshair(centerLngLat, radiusMeters) {
   };
 }
 
-function clearOverlays(map) {
+
+function clearOverlays(map) 
+{
   if (!map) return;
 
   const style = map.getStyle?.();
@@ -67,15 +103,17 @@ function clearOverlays(map) {
     });
 }
 
-function addOrUpdateImageOverlay(map, layerId, imageUrl, bbox_ll, opacity = 0.6) {
+
+function addOrUpdateImageOverlay(map, layerId, imageUrl, bbox_ll, opacity = 0.6)
+{
   if (!bbox_ll) return;
 
   const [minLon, minLat, maxLon, maxLat] = bbox_ll;
 
-  // MapLibre expects 4 corners in this order:
-  // top-left, top-right, bottom-right, bottom-left
-  const coordinates = [
-    [minLon, maxLat],
+
+  const coordinates = 
+  [
+    [minLon, maxLat],         //creates image overlay coordinates
     [maxLon, maxLat],
     [maxLon, minLat],
     [minLon, minLat],
@@ -84,18 +122,21 @@ function addOrUpdateImageOverlay(map, layerId, imageUrl, bbox_ll, opacity = 0.6)
   const sourceId = `${layerId}-src`;
 
   const existing = map.getSource(sourceId);
-  if (existing) {
+  if (existing) 
+  {
     existing.updateImage({ url: imageUrl, coordinates });
     return;
   }
 
-  map.addSource(sourceId, {
+  map.addSource(sourceId, 
+  {
     type: "image",
     url: imageUrl,
     coordinates,
   });
 
-  map.addLayer({
+  map.addLayer(
+  {
     id: layerId,
     type: "raster",
     source: sourceId,
@@ -105,13 +146,14 @@ function addOrUpdateImageOverlay(map, layerId, imageUrl, bbox_ll, opacity = 0.6)
   });
 }
 
-export default function MapUI() {
+export default function MapUI() 
+{
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
 
   const [selectedCityKey, setSelectedCityKey] = useState("cookeville");
-  const [radiusMeters, setRadiusMeters] = useState(500); // UI-only now (optional)
-  const [centerLngLat, setCenterLngLat] = useState(null); // UI-only now (optional)
+  const [radiusMeters, setRadiusMeters] = useState(500); 
+  const [centerLngLat, setCenterLngLat] = useState(null); 
   const [mapLoaded, setMapLoaded] = useState(false);
   const [hoverLngLat, setHoverLngLat] = useState(null);
   const [flyingTo, setFlyingTo] = useState(false);
@@ -121,42 +163,54 @@ export default function MapUI() {
 
   const selectedCity = CITIES[selectedCityKey];
 
-  const radiusLabel = useMemo(() => {
+  const radiusLabel = useMemo(() => 
+  {
     if (radiusMeters < 1000) return `${radiusMeters}m`;
+
     const km = radiusMeters / 1000;
     return `${km.toFixed(km < 10 ? 2 : 1)}km`;
   }, [radiusMeters]);
 
-  const areaLabel = useMemo(() => {
+  const areaLabel = useMemo(() => 
+  {
     const r = radiusMeters;
     const area = Math.PI * r * r;
     if (area < 1_000_000) return `${(area / 1000).toFixed(1)}k m²`;
+
     return `${(area / 1_000_000).toFixed(3)} km²`;
   }, [radiusMeters]);
 
   // ---- map init ----
-  useEffect(() => {
+  useEffect(() => 
+  {
     if (!mapContainerRef.current) return;
 
-    const map = new maplibregl.Map({
+    const map = new maplibregl.Map(
+    {
       container: mapContainerRef.current,
-      style: {
+      style: 
+      {
         version: 8,
-        sources: {
-          satellite: {
+        sources: 
+        {
+          satellite: 
+          {
             type: "raster",
-            tiles: [
+            tiles: 
+            [
               "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
             ],
             tileSize: 256,
           },
         },
-        layers: [
+        layers: 
+        [
           {
             id: "base-raster",
             type: "raster",
             source: "satellite",
-            paint: {
+            paint: 
+            {
               "raster-saturation": -0.3,
               "raster-brightness-min": 0.05,
             },
@@ -170,20 +224,23 @@ export default function MapUI() {
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
 
-    map.on("load", () => {
-      // Keep your radius/crosshair/center layers if you want the UI visuals
+    map.on("load", () => 
+    {
       map.addSource(SOURCE_ID, { type: "geojson", data: turf.featureCollection([]) });
-      map.addLayer({
+      map.addLayer(
+      {
         id: FILL_LAYER_ID,
         type: "fill",
         source: SOURCE_ID,
         paint: { "fill-color": PRIMARY, "fill-opacity": 0.1 },
       });
-      map.addLayer({
+      map.addLayer(
+      {
         id: LINE_LAYER_ID,
         type: "line",
         source: SOURCE_ID,
-        paint: {
+        paint: 
+        {
           "line-color": PRIMARY,
           "line-width": 1.5,
           "line-opacity": 1,
@@ -192,14 +249,16 @@ export default function MapUI() {
       });
 
       map.addSource(CROSSHAIR_SOURCE_ID, { type: "geojson", data: turf.featureCollection([]) });
-      map.addLayer({
+      map.addLayer(
+      {
         id: CROSSHAIR_LAYER_H,
         type: "line",
         source: CROSSHAIR_SOURCE_ID,
         filter: ["==", "$type", "LineString"],
         paint: { "line-color": PRIMARY, "line-width": 1, "line-opacity": 0.5, "line-dasharray": [3, 2] },
       });
-      map.addLayer({
+      map.addLayer(
+      {
         id: CROSSHAIR_LAYER_V,
         type: "line",
         source: CROSSHAIR_SOURCE_ID,
@@ -208,11 +267,13 @@ export default function MapUI() {
       });
 
       map.addSource(CENTER_SOURCE_ID, { type: "geojson", data: turf.featureCollection([]) });
-      map.addLayer({
+      map.addLayer(
+      {
         id: CENTER_LAYER_ID,
         type: "circle",
         source: CENTER_SOURCE_ID,
-        paint: {
+        paint: 
+        {
           "circle-radius": 5,
           "circle-color": ACCENT,
           "circle-stroke-color": "#fff",
@@ -221,12 +282,13 @@ export default function MapUI() {
         },
       });
 
-      // Optional: keep click for showing radius only (NOT used for overlays)
-      map.on("click", (e) => {
+      map.on("click", (e) => 
+      {
         setCenterLngLat([e.lngLat.lng, e.lngLat.lat]);
       });
 
-      map.on("mousemove", (e) => {
+      map.on("mousemove", (e) => 
+      {
         setHoverLngLat([e.lngLat.lng, e.lngLat.lat]);
       });
       map.on("mouseleave", () => setHoverLngLat(null));
@@ -235,20 +297,22 @@ export default function MapUI() {
       setMapLoaded(true);
     });
 
-    return () => {
+    return () => 
+    {
       map.remove();
       mapRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- city flyTo ----
-  useEffect(() => {
+
+  useEffect(() => 
+  {
     const map = mapRef.current;
     if (!map) return;
 
     setFlyingTo(true);
-    map.flyTo({
+    map.flyTo(
+    {
       center: selectedCity.center,
       zoom: selectedCity.zoom,
       speed: 1.4,
@@ -260,8 +324,9 @@ export default function MapUI() {
     return () => clearTimeout(timer);
   }, [selectedCityKey, selectedCity.center, selectedCity.zoom]);
 
-  // ---- draw radius/crosshair (UI only) ----
-  useEffect(() => {
+
+  useEffect(() => 
+  {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
 
@@ -270,7 +335,8 @@ export default function MapUI() {
     const crosshairSource = map.getSource(CROSSHAIR_SOURCE_ID);
     if (!radiusSource || !centerSource || !crosshairSource) return;
 
-    if (!centerLngLat) {
+    if (!centerLngLat) 
+    {
       radiusSource.setData(turf.featureCollection([]));
       centerSource.setData(turf.featureCollection([]));
       crosshairSource.setData(turf.featureCollection([]));
@@ -284,15 +350,18 @@ export default function MapUI() {
     crosshairSource.setData(turf.featureCollection([ch.h, ch.v]));
   }, [centerLngLat, radiusMeters, mapLoaded]);
 
-  // ✅ NEW: load all overlays whenever city changes
-  useEffect(() => {
+
+  useEffect(() => 
+  {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
 
     let cancelled = false;
 
-    async function loadAllOverlays() {
-      try {
+    async function loadAllOverlays() 
+    {
+      try 
+      {
         setLoading(true);
         setError("");
 
@@ -309,14 +378,15 @@ export default function MapUI() {
         console.log("overlay json:", json);
 
         const results = json?.results || [];
-        if (!results.length) {
+        if (!results.length) 
+        {
           setError("No overlays returned for this city.");
           return;
         }
 
-        // Fit bounds to ALL overlays
         let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
-        for (const r of results) {
+        for (const r of results) 
+        {
           const b = r.bbox_ll;
           if (!b || b.length !== 4) continue;
           minLon = Math.min(minLon, b[0]);
@@ -324,25 +394,32 @@ export default function MapUI() {
           maxLon = Math.max(maxLon, b[2]);
           maxLat = Math.max(maxLat, b[3]);
         }
-        if (Number.isFinite(minLon)) {
+
+        if (Number.isFinite(minLon)) 
+        {
           map.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 70 });
         }
 
-        // Add every overlay
-        results.forEach((r, i) => {
+        results.forEach((r, i) => 
+        {
           if (!r?.overlay_url || !r?.bbox_ll) return;
           const layerId = `pred-overlay-${i}`;
           const overlayUrl = `${backendBase}${r.overlay_url}`;
           addOrUpdateImageOverlay(map, layerId, overlayUrl, r.bbox_ll, 0.65);
         });
 
-        if (!cancelled) {
+        if (!cancelled) 
+        {
           console.log(`Added ${results.length} overlays.`);
         }
-      } catch (e) {
+      } 
+      catch (e) 
+      {
         console.error(e);
         if (!cancelled) setError(String(e));
-      } finally {
+      }
+      finally 
+      {
         if (!cancelled) setLoading(false);
       }
     }
@@ -351,6 +428,7 @@ export default function MapUI() {
 
     return () => { cancelled = true; };
   }, [selectedCityKey, mapLoaded]);
+
 
   return (
     <div style={s.root}>
@@ -593,29 +671,3 @@ const s = {
   hintIcon: { fontSize: 28, color: PRIMARY, lineHeight: 1, opacity: 0.4 },
   hintText: { fontSize: 10, textAlign: "center", lineHeight: 1.5, letterSpacing: 0.3, opacity: 0.7 },
 };
-
-const css = `
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-  .city-btn:hover {
-    background: rgba(0, 212, 255, 0.08) !important;
-    color: rgba(0, 212, 255, 0.8) !important;
-  }
-  .radius-slider::-webkit-slider-thumb {
-    width: 14px;
-    height: 14px;
-  }
-  .maplibregl-ctrl-top-right {
-    top: 16px !important;
-    right: 16px !important;
-  }
-  .maplibregl-ctrl button {
-    background-color: rgba(4, 8, 12, 0.92) !important;
-    border-color: rgba(0, 212, 255, 0.25) !important;
-  }
-  .maplibregl-ctrl button span {
-    filter: invert(1) !important;
-  }
-`;

@@ -1,23 +1,22 @@
+import ast
+import csv
+import json
 import math
 import os
 import uuid
-import ast
-import json
-import csv
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 import requests
+import torch
+import torch.nn.functional as F
 from PIL import Image
+from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-
-import torch
-import torch.nn.functional as F
-from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 
 # ----------------------------
 # Config
@@ -26,11 +25,10 @@ SERVICE_EXPORT_URL = "https://maps.nashville.gov/arcgis/rest/services/Imagery/20
 EXPORT_ROOT = Path("exports")
 EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 
-BBoxLL = Tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat) EPSG:4326
+BBoxLL = Tuple[float, float, float, float]  
 
-# Point these at your real CSV paths
-CSV_NASH = r"C:\Users\jayjo\Downloads\GT_Hackathon\inference_parking_masks_nash.csv"
-CSV_COOK = r"C:\Users\jayjo\Downloads\GT_Hackathon\inference_parking_masks_cook.csv"
+CSV_NASH = "inference_parking_masks_nash.csv"
+CSV_COOK = "inference_parking_masks_cook.csv"
 
 # ----------------------------
 # Flask
@@ -110,7 +108,7 @@ def bbox_ll_to_bbox_3857(bbox: BBoxLL) -> Tuple[float, float, float, float]:
 
 
 # ----------------------------
-# SegFormer load (kept, even if you’re using CSV inference)
+# SegFormer load 
 # ----------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 feature_extractor = SegformerImageProcessor(do_resize=True, size=(256, 256))
@@ -122,7 +120,7 @@ model = SegformerForSemanticSegmentation.from_pretrained(
 ).to(device)
 model.eval()
 
-PARKING_CLASS_ID = 0  # adjust if needed
+PARKING_CLASS_ID = 0  
 
 
 # ----------------------------
@@ -271,7 +269,7 @@ def serve_export(job_id, filename):
 
 
 # ----------------------------
-# API: imagery (unchanged)
+# API: imagery 
 # ----------------------------
 @app.route("/api/imagery", methods=["POST"])
 def api_imagery():
@@ -312,7 +310,7 @@ def api_imagery():
 
 
 # ----------------------------
-# API: segment (kept)
+# API: segment
 # ----------------------------
 @app.route("/api/segment", methods=["POST"])
 def api_segment():
@@ -368,7 +366,7 @@ def _segment_job(job_id: str, city_key: str):
 
 
 # ----------------------------
-# NEW API: overlays (show ALL saved overlays for a city)
+# Overlay APIs
 # ----------------------------
 @app.route("/api/overlays", methods=["GET"])
 def api_overlays():
@@ -385,7 +383,6 @@ def api_overlays():
         if not job_dir.is_dir():
             continue
 
-        # For each tile, ensure overlay exists then add it
         for tile_path in sorted(job_dir.glob("cell_*.png")):
             if tile_path.name.endswith("_overlay.png") or tile_path.name.endswith("_mask.png"):
                 continue
@@ -393,7 +390,6 @@ def api_overlays():
             stem = tile_path.stem  # cell_00012
             row = lookup.get(stem)
             if not row:
-                # if the CSV doesn't have it, skip it for that city
                 continue
 
             bbox_ll = parse_bbox_ll(row.get("bbox_ll_epsg4326"))
@@ -403,7 +399,6 @@ def api_overlays():
             overlay_file = job_dir / f"{stem}_overlay.png"
             mask_file = job_dir / f"{stem}_mask.png"
 
-            # create overlay if missing
             if not overlay_file.exists() or not mask_file.exists():
                 try:
                     save_mask_and_overlay_from_csv(
