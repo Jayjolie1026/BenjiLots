@@ -2,23 +2,24 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import * as turf from "@turf/turf";
 import "maplibre-gl/dist/maplibre-gl.css";
+import BenjiLotsCar from "../assets/Benji Lots Car.png";
 
 const PRIMARY = "#00D4FF";
 const PRIMARY_DIM = "rgba(0, 212, 255, 0.18)";
 const ACCENT = "#FF6B35";
 
 const CITIES = {
-  cookeville: {
-    label: "Cookeville",
-    abbr: "CVL",
-    center: [-85.5016, 36.1628],
-    zoom: 13,
-  },
   nashville: {
     label: "Nashville",
     abbr: "BNA",
     center: [-86.7816, 36.1627],
     zoom: 12,
+  },
+  cookeville: {
+    label: "Cookeville",
+    abbr: "CVL",
+    center: [-85.5016, 36.1628],
+    zoom: 13,
   },
 };
 
@@ -84,9 +85,10 @@ export default function MapUI() {
         sources: {
           "satellite": {
             type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tiles: [
+              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+            ],
             tileSize: 256,
-            attribution: "© OpenStreetMap contributors",
           },
         },
         layers: [
@@ -215,19 +217,15 @@ export default function MapUI() {
       <header style={s.header}>
         <div style={s.headerLeft}>
           <div style={s.logo}>
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <circle cx="11" cy="11" r="10" stroke={PRIMARY} strokeWidth="1.5" />
-              <circle cx="11" cy="11" r="5" stroke={PRIMARY} strokeWidth="1" strokeDasharray="3 2" />
-              <circle cx="11" cy="11" r="2" fill={PRIMARY} />
-              <line x1="11" y1="1" x2="11" y2="5" stroke={PRIMARY} strokeWidth="1.5" />
-              <line x1="11" y1="17" x2="11" y2="21" stroke={PRIMARY} strokeWidth="1.5" />
-              <line x1="1" y1="11" x2="5" y2="11" stroke={PRIMARY} strokeWidth="1.5" />
-              <line x1="17" y1="11" x2="21" y2="11" stroke={PRIMARY} strokeWidth="1.5" />
-            </svg>
+            <img
+              src={BenjiLotsCar}
+              alt="BenjiLots"
+              style={{ width: 130, height: 80, display: "block" }}
+            />
           </div>
           <div>
-            <div style={s.appTitle}>RADII</div>
-            <div style={s.appSub}>Area Selection Tool · Tennessee</div>
+            <div style={s.appTitle}>BENJI LOTS</div>
+            <div style={s.appSub}>Parking Lot Locater</div>
           </div>
         </div>
 
@@ -331,11 +329,6 @@ export default function MapUI() {
               </div>
             )}
           </div>
-        </div>
-
-        {/* Bottom attribution strip */}
-        <div style={s.attribution}>
-          © OpenStreetMap contributors
         </div>
       </div>
     </div>
