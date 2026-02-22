@@ -1,29 +1,54 @@
 import math
+import os
 import uuid
+import ast
+import json
+import csv
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
+import numpy as np
+import pandas as pd
 import requests
+from PIL import Image
+
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+
+import torch
+import torch.nn.functional as F
+from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 
 # ----------------------------
 # Config
 # ----------------------------
 SERVICE_EXPORT_URL = "https://maps.nashville.gov/arcgis/rest/services/Imagery/2023Imagery_WGS84/MapServer/export"
-EXPORT_ROOT = Path("exports")  # images saved here
+EXPORT_ROOT = Path("exports")
 EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 
 BBoxLL = Tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat) EPSG:4326
 
-app = Flask(__name__)
-CORS(app)  # allow React dev server
+# Point these at your real CSV paths
+CSV_NASH = r"C:\Users\jayjo\Downloads\GT_Hackathon\inference_parking_masks_nash.csv"
+CSV_COOK = r"C:\Users\jayjo\Downloads\GT_Hackathon\inference_parking_masks_cook.csv"
 
+# ----------------------------
+# Flask
+# ----------------------------
+app = Flask(__name__)
+CORS(
+    app,
+    resources={
+        r"/api/*": {"origins": "*"},
+        r"/exports/*": {"origins": "*"},
+    },
+)
 
 # ----------------------------
 # Web Mercator helpers
 # ----------------------------
 R = 6378137.0
+
 
 def lonlat_to_webmerc(lon: float, lat: float) -> Tuple[float, float]:
     lat = max(min(lat, 85.05112878), -85.05112878)
@@ -31,10 +56,12 @@ def lonlat_to_webmerc(lon: float, lat: float) -> Tuple[float, float]:
     y = R * math.log(math.tan(math.pi / 4.0 + math.radians(lat) / 2.0))
     return x, y
 
+
 def webmerc_to_lonlat(x: float, y: float) -> Tuple[float, float]:
     lon = math.degrees(x / R)
     lat = math.degrees(2.0 * math.atan(math.exp(y / R)) - math.pi / 2.0)
     return lon, lat
+
 
 def bbox_3857_to_bbox_ll(bbox_3857: Tuple[float, float, float, float]) -> BBoxLL:
     minx, miny, maxx, maxy = bbox_3857
@@ -42,90 +69,13 @@ def bbox_3857_to_bbox_ll(bbox_3857: Tuple[float, float, float, float]) -> BBoxLL
     lon1, lat1 = webmerc_to_lonlat(maxx, maxy)
     return (min(lon0, lon1), min(lat0, lat1), max(lon0, lon1), max(lat0, lat1))
 
+
 def bbox_from_point_radius_ll(lon: float, lat: float, radius_m: float) -> BBoxLL:
     cx, cy = lonlat_to_webmerc(lon, lat)
     bbox_3857 = (cx - radius_m, cy - radius_m, cx + radius_m, cy + radius_m)
     return bbox_3857_to_bbox_ll(bbox_3857)
 
 
-import os
-import numpy as np
-from PIL import Image
-
-import torch
-import torch.nn.functional as F
-from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
-
-# --- load once at startup ---
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-feature_extractor = SegformerImageProcessor(do_resize=True, size=(256, 256))
-
-model = SegformerForSemanticSegmentation.from_pretrained("C:\\Users\\jayjo\\Downloads\\GT_Hackathon\\segformer-parkseg12k").to(device)
-model.eval()
-
-
-
-
-import numpy as np
-from PIL import Image
-import torch
-import torch.nn.functional as F
-
-# set this once (IMPORTANT)
-PARKING_CLASS_ID = 1  # change if your label mapping uses a different id
-
-def run_segformer_argmax_mask(pil_img: Image.Image, size_px=None):
-    """
-    Returns:
-      pred_class: (H,W) uint8 class ids
-      parking_mask: (H,W) uint8 0/255 for PARKING_CLASS_ID
-    """
-    pil_img = pil_img.convert("RGB")
-    orig_w, orig_h = pil_img.size
-
-    encoded = feature_extractor(pil_img, return_tensors="pt")
-    pixel_values = encoded["pixel_values"].to(device)
-
-    with torch.no_grad():
-        outputs = model(pixel_values=pixel_values)
-        logits = outputs.logits  # [1, C, h, w]
-
-    # upsample logits back to target resolution
-    if size_px is None:
-        target_h, target_w = orig_h, orig_w
-    else:
-        target_w, target_h = size_px  # (W,H)
-
-    logits_up = F.interpolate(
-        logits, size=(target_h, target_w),
-        mode="bilinear", align_corners=False
-    )
-
-    pred_class = torch.argmax(logits_up, dim=1)[0].cpu().numpy().astype(np.uint8)  # (H,W)
-    parking_mask = (pred_class == PARKING_CLASS_ID).astype(np.uint8) * 255
-
-    return pred_class, parking_mask
-
-
-def save_mask_and_overlay_argmax(img_path: str, mask_path: str, overlay_path: str, alpha=0.4):
-    img = Image.open(img_path).convert("RGB")
-    mask = run_segformer_sliding_window(img, patch_size=256, stride=128)
-    coverage = float((mask > 0).mean())
-    print(f"{img_path} parking_coverage={coverage:.4f}")
-
-    Image.fromarray(mask).save(mask_path)
-
-    # overlay red where mask is 255
-    mask_l = Image.fromarray(mask).convert("L")
-    red = Image.new("RGB", img.size, (255, 0, 0))
-    overlay = Image.composite(red, img, mask_l)
-    blended = Image.blend(img, overlay, alpha=alpha)
-    blended.save(overlay_path)
-
-# ----------------------------
-# Grid / tiling
-# ----------------------------
 def bbox_grid_ll(bbox: BBoxLL, step_deg: float) -> List[BBoxLL]:
     minx, miny, maxx, maxy = bbox
     if minx >= maxx or miny >= maxy:
@@ -151,46 +101,124 @@ def bbox_grid_ll(bbox: BBoxLL, step_deg: float) -> List[BBoxLL]:
             cells.append((x0, y0, x1, y1))
     return cells
 
+
 def bbox_ll_to_bbox_3857(bbox: BBoxLL) -> Tuple[float, float, float, float]:
     min_lon, min_lat, max_lon, max_lat = bbox
     x0, y0 = lonlat_to_webmerc(min_lon, min_lat)
     x1, y1 = lonlat_to_webmerc(max_lon, max_lat)
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
-import numpy as np
-from PIL import Image
-import torch
-import torch.nn.functional as F
 
-def run_segformer_sliding_window(pil_img, patch_size=256, stride=256):
-    img = np.array(pil_img.convert("RGB"))
-    H, W, _ = img.shape
-    out_mask = np.zeros((H, W), dtype=np.uint8)
+# ----------------------------
+# SegFormer load (kept, even if you’re using CSV inference)
+# ----------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+feature_extractor = SegformerImageProcessor(do_resize=True, size=(256, 256))
 
-    ys = list(range(0, max(H - patch_size + 1, 1), stride))
-    xs = list(range(0, max(W - patch_size + 1, 1), stride))
-    if ys[-1] != H - patch_size: ys.append(H - patch_size)
-    if xs[-1] != W - patch_size: xs.append(W - patch_size)
+# If you truly never want to run the model, you can remove this block.
+# Keeping it as-is from your file:
+model = SegformerForSemanticSegmentation.from_pretrained(
+    r"C:\Users\jayjo\Downloads\GT_Hackathon\segformer-parkseg12k_2"
+).to(device)
+model.eval()
 
-    for y0 in ys:
-        for x0 in xs:
-            patch = img[y0:y0+patch_size, x0:x0+patch_size]
-            patch_pil = Image.fromarray(patch)
+PARKING_CLASS_ID = 0  # adjust if needed
 
-            encoded = feature_extractor(patch_pil, return_tensors="pt")
-            pixel_values = encoded["pixel_values"].to(device)
 
-            with torch.no_grad():
-                logits = model(pixel_values=pixel_values).logits
+# ----------------------------
+# CSV loading
+# ----------------------------
+def load_mask_csv(csv_path: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Returns dict: image_name(stem) -> row_dict
+    expects columns:
+      image_name, bbox_ll_epsg4326, width_px, height_px, parking_mask_flat
+    """
+    if not os.path.exists(csv_path):
+        print(f"[WARN] CSV not found: {csv_path}", flush=True)
+        return {}
 
-            logits_up = F.interpolate(logits, size=(patch_size, patch_size),
-                                      mode="bilinear", align_corners=False)
-            pred_class = torch.argmax(logits_up, dim=1)[0].cpu().numpy().astype(np.uint8)
-            pred = (pred_class == PARKING_CLASS_ID).astype(np.uint8) * 255
+    df = pd.read_csv(csv_path)
+    df["image_name"] = df["image_name"].astype(str).str.replace(".png", "", regex=False)
+    return {row["image_name"]: row.to_dict() for _, row in df.iterrows()}
 
-            out_mask[y0:y0+patch_size, x0:x0+patch_size] = pred
 
-    return out_mask
+MASKS_NASH = load_mask_csv(CSV_NASH)
+MASKS_COOK = load_mask_csv(CSV_COOK)
+
+
+def parse_bbox_ll(val):
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return None
+    if isinstance(val, (list, tuple)):
+        return [float(x) for x in val]
+    s = str(val).strip()
+    try:
+        out = ast.literal_eval(s)
+        if isinstance(out, (list, tuple)) and len(out) == 4:
+            return [float(x) for x in out]
+    except Exception:
+        pass
+    return None
+
+
+def parse_mask_flat(val, width: int, height: int):
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return None
+
+    if isinstance(val, str):
+        try:
+            arr = ast.literal_eval(val)
+        except Exception:
+            arr = [int(x) for x in val.replace("[", "").replace("]", "").split(",") if x.strip() != ""]
+    else:
+        arr = val
+
+    arr = np.array(arr, dtype=np.uint8)
+    if arr.size != width * height:
+        raise ValueError(f"mask_flat size {arr.size} != width*height {width*height}")
+
+    mask = arr.reshape((height, width))
+    if mask.max() <= 1:
+        mask = (mask * 255).astype(np.uint8)
+    return mask
+
+
+def save_mask_and_overlay_from_csv(img_path: Path, mask_path: Path, overlay_path: Path, city_key: str, alpha=0.4):
+    stem = img_path.stem  # "cell_00001"
+
+    lookup = MASKS_NASH if city_key == "nashville" else MASKS_COOK
+    row = lookup.get(stem)
+    if not row:
+        # fallback try both
+        row = MASKS_NASH.get(stem) or MASKS_COOK.get(stem)
+    if not row:
+        raise FileNotFoundError(f"No CSV row found for {stem} in city {city_key}")
+
+    bbox_ll = parse_bbox_ll(row.get("bbox_ll_epsg4326"))
+    width = int(row.get("width_px", 1024))
+    height = int(row.get("height_px", 1024))
+    mask = parse_mask_flat(row.get("parking_mask_flat"), width=width, height=height)
+
+    # Save mask
+    Image.fromarray(mask).save(mask_path)
+
+    # Make overlay
+    img = Image.open(img_path).convert("RGB")
+    if img.size != (width, height):
+        mask_img = Image.fromarray(mask).resize(img.size, resample=Image.NEAREST)
+    else:
+        mask_img = Image.fromarray(mask)
+
+    mask_l = mask_img.convert("L")
+    red = Image.new("RGB", img.size, (255, 0, 0))
+    overlay = Image.composite(red, img, mask_l)
+    blended = Image.blend(img, overlay, alpha=alpha)
+    blended.save(overlay_path)
+
+    coverage = float((np.array(mask_img) > 0).mean())
+    return bbox_ll, coverage
+
 
 # ----------------------------
 # ArcGIS export downloader
@@ -224,7 +252,7 @@ def export_cell_image(
             txt = r.text[:500]
         except Exception:
             txt = "<no text>"
-        print(f"[WARN] Non-image response: {ctype}\n{txt}\n")
+        print(f"[WARN] Non-image response: {ctype}\n{txt}\n", flush=True)
         return False
 
     with open(out_file, "wb") as f:
@@ -235,30 +263,30 @@ def export_cell_image(
 
 
 # ----------------------------
-# API + static serving
+# Static serving
+# ----------------------------
+@app.route("/exports/<job_id>/<filename>")
+def serve_export(job_id, filename):
+    return send_from_directory(EXPORT_ROOT / job_id, filename)
+
+
+# ----------------------------
+# API: imagery (unchanged)
 # ----------------------------
 @app.route("/api/imagery", methods=["POST"])
 def api_imagery():
-    """
-    Body JSON:
-      { "lat": 36.1627, "lon": -86.7816, "radius_m": 1200,
-        "step_deg": 0.005, "size_px": 1024, "max_tiles": 25 }
-    """
     data = request.get_json(force=True)
 
     lat = float(data["lat"])
     lon = float(data["lon"])
     radius_m = float(data.get("radius_m", 1000))
 
-    # controls
     step_deg = float(data.get("step_deg", 0.005))
     size_px = int(data.get("size_px", 1024))
-    max_tiles = int(data.get("max_tiles", 25))  # IMPORTANT: keep runtime reasonable
+    max_tiles = int(data.get("max_tiles", 25))
 
     bbox = bbox_from_point_radius_ll(lon, lat, radius_m)
     cells = bbox_grid_ll(bbox, step_deg)
-
-    # Limit tiles to avoid huge downloads in a demo
     cells = cells[:max_tiles]
 
     job_id = uuid.uuid4().hex[:10]
@@ -272,43 +300,36 @@ def api_imagery():
         if ok:
             saved_urls.append(f"/exports/{job_id}/{out_path.name}")
 
-    return jsonify({
-        "job_id": job_id,
-        "bbox": bbox,
-        "tiles": saved_urls,
-        "tile_count": len(saved_urls),
-        "note": "Tiles are square exports clipped by bbox grid."
-    })
-
-@app.route("/exports/<job_id>/<filename>")
-def serve_export(job_id, filename):
-    return send_from_directory(EXPORT_ROOT / job_id, filename)
-
-from flask import jsonify, request
+    return jsonify(
+        {
+            "job_id": job_id,
+            "bbox": bbox,
+            "tiles": saved_urls,
+            "tile_count": len(saved_urls),
+            "note": "Tiles are square exports clipped by bbox grid.",
+        }
+    )
 
 
-
-
+# ----------------------------
+# API: segment (kept)
+# ----------------------------
 @app.route("/api/segment", methods=["POST"])
 def api_segment():
+    print("HIT /api/segment", flush=True)
     data = request.get_json(silent=True) or {}
-
     job_id = data.get("job_id")
+    city_key = (data.get("city_key") or "").lower()
+
     if not job_id:
-        return jsonify({
-            "error": "Missing job_id. Call /api/imagery first, then POST {job_id} to /api/segment."
-        }), 400
+        return jsonify({"error": "Missing job_id"}), 400
+    if city_key not in ("nashville", "cookeville"):
+        return jsonify({"error": "Missing/invalid city_key (nashville/cookeville)"}), 400
 
-    return _segment_job(job_id)
-
-
-@app.route("/api/segment/<job_id>", methods=["GET"])
-def api_segment_get(job_id):
-    # easier testing in browser: GET /api/segment/<job_id>
-    return _segment_job(job_id)
+    return _segment_job(job_id, city_key)
 
 
-def _segment_job(job_id: str):
+def _segment_job(job_id: str, city_key: str):
     job_dir = EXPORT_ROOT / job_id
     if not job_dir.exists():
         return jsonify({"error": f"job_id not found: {job_id}"}), 404
@@ -323,20 +344,90 @@ def _segment_job(job_id: str):
         overlay_file = job_dir / f"{stem}_overlay.png"
 
         if not (mask_file.exists() and overlay_file.exists()):
-            save_mask_and_overlay_argmax(
-                img_path=str(p),
-                mask_path=str(mask_file),
-                overlay_path=str(overlay_file),
-                alpha=0.4
+            bbox_ll, _coverage = save_mask_and_overlay_from_csv(
+                img_path=p,
+                mask_path=mask_file,
+                overlay_path=overlay_file,
+                city_key=city_key,
+                alpha=0.4,
             )
+        else:
+            row = (MASKS_NASH if city_key == "nashville" else MASKS_COOK).get(stem)
+            bbox_ll = parse_bbox_ll(row.get("bbox_ll_epsg4326")) if row else None
 
-        results.append({
-            "image_url": f"/exports/{job_id}/{p.name}",
-            "mask_url": f"/exports/{job_id}/{mask_file.name}",
-            "overlay_url": f"/exports/{job_id}/{overlay_file.name}",
-        })
+        results.append(
+            {
+                "image_url": f"/exports/{job_id}/{p.name}",
+                "mask_url": f"/exports/{job_id}/{mask_file.name}",
+                "overlay_url": f"/exports/{job_id}/{overlay_file.name}",
+                "bbox_ll": bbox_ll,
+            }
+        )
 
     return jsonify({"job_id": job_id, "count": len(results), "results": results})
+
+
+# ----------------------------
+# NEW API: overlays (show ALL saved overlays for a city)
+# ----------------------------
+@app.route("/api/overlays", methods=["GET"])
+def api_overlays():
+    city_key = (request.args.get("city_key") or "").lower().strip()
+    if city_key not in ("nashville", "cookeville"):
+        return jsonify({"error": "city_key must be nashville or cookeville"}), 400
+
+    lookup = MASKS_NASH if city_key == "nashville" else MASKS_COOK
+
+    # Find every job dir under exports
+    results = []
+
+    for job_dir in sorted(EXPORT_ROOT.glob("*")):
+        if not job_dir.is_dir():
+            continue
+
+        # For each tile, ensure overlay exists then add it
+        for tile_path in sorted(job_dir.glob("cell_*.png")):
+            if tile_path.name.endswith("_overlay.png") or tile_path.name.endswith("_mask.png"):
+                continue
+
+            stem = tile_path.stem  # cell_00012
+            row = lookup.get(stem)
+            if not row:
+                # if the CSV doesn't have it, skip it for that city
+                continue
+
+            bbox_ll = parse_bbox_ll(row.get("bbox_ll_epsg4326"))
+            if not bbox_ll:
+                continue
+
+            overlay_file = job_dir / f"{stem}_overlay.png"
+            mask_file = job_dir / f"{stem}_mask.png"
+
+            # create overlay if missing
+            if not overlay_file.exists() or not mask_file.exists():
+                try:
+                    save_mask_and_overlay_from_csv(
+                        img_path=tile_path,
+                        mask_path=mask_file,
+                        overlay_path=overlay_file,
+                        city_key=city_key,
+                        alpha=0.4,
+                    )
+                except Exception as e:
+                    print(f"[WARN] failed to create overlay for {tile_path}: {e}", flush=True)
+                    continue
+
+            results.append(
+                {
+                    "job_id": job_dir.name,
+                    "overlay_url": f"/exports/{job_dir.name}/{overlay_file.name}",
+                    "bbox_ll": bbox_ll,
+                    "tile_name": tile_path.name,
+                }
+            )
+
+    return jsonify({"city_key": city_key, "count": len(results), "results": results})
+
+
 if __name__ == "__main__":
-    # Run backend: python app.py
     app.run(host="0.0.0.0", port=5000, debug=True)

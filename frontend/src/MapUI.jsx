@@ -32,6 +32,8 @@ const CROSSHAIR_SOURCE_ID = "crosshair-source";
 const CROSSHAIR_LAYER_H = "crosshair-h";
 const CROSSHAIR_LAYER_V = "crosshair-v";
 
+const backendBase = "http://localhost:5000"; // change if deployed
+
 function makeCircleGeoJSON(centerLngLat, radiusMeters) {
   const [lng, lat] = centerLngLat;
   return turf.circle([lng, lat], radiusMeters / 1000, {
@@ -49,16 +51,73 @@ function makeCrosshair(centerLngLat, radiusMeters) {
   };
 }
 
+function clearOverlays(map) {
+  if (!map) return;
+
+  const style = map.getStyle?.();
+  const layers = style?.layers || [];
+
+  layers
+    .map((l) => l.id)
+    .filter((id) => id.startsWith("pred-overlay-"))
+    .forEach((layerId) => {
+      const sourceId = `${layerId}-src`;
+      if (map.getLayer(layerId)) map.removeLayer(layerId);
+      if (map.getSource(sourceId)) map.removeSource(sourceId);
+    });
+}
+
+function addOrUpdateImageOverlay(map, layerId, imageUrl, bbox_ll, opacity = 0.6) {
+  if (!bbox_ll) return;
+
+  const [minLon, minLat, maxLon, maxLat] = bbox_ll;
+
+  // MapLibre expects 4 corners in this order:
+  // top-left, top-right, bottom-right, bottom-left
+  const coordinates = [
+    [minLon, maxLat],
+    [maxLon, maxLat],
+    [maxLon, minLat],
+    [minLon, minLat],
+  ];
+
+  const sourceId = `${layerId}-src`;
+
+  const existing = map.getSource(sourceId);
+  if (existing) {
+    existing.updateImage({ url: imageUrl, coordinates });
+    return;
+  }
+
+  map.addSource(sourceId, {
+    type: "image",
+    url: imageUrl,
+    coordinates,
+  });
+
+  map.addLayer({
+    id: layerId,
+    type: "raster",
+    source: sourceId,
+    paint: {
+      "raster-opacity": opacity,
+    },
+  });
+}
+
 export default function MapUI() {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
 
   const [selectedCityKey, setSelectedCityKey] = useState("cookeville");
-  const [radiusMeters, setRadiusMeters] = useState(500);
-  const [centerLngLat, setCenterLngLat] = useState(null);
+  const [radiusMeters, setRadiusMeters] = useState(500); // UI-only now (optional)
+  const [centerLngLat, setCenterLngLat] = useState(null); // UI-only now (optional)
   const [mapLoaded, setMapLoaded] = useState(false);
   const [hoverLngLat, setHoverLngLat] = useState(null);
   const [flyingTo, setFlyingTo] = useState(false);
+
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   const selectedCity = CITIES[selectedCityKey];
 
@@ -75,6 +134,7 @@ export default function MapUI() {
     return `${(area / 1_000_000).toFixed(3)} km²`;
   }, [radiusMeters]);
 
+  // ---- map init ----
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
@@ -83,10 +143,10 @@ export default function MapUI() {
       style: {
         version: 8,
         sources: {
-          "satellite": {
+          satellite: {
             type: "raster",
             tiles: [
-              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
             ],
             tileSize: 256,
           },
@@ -96,7 +156,10 @@ export default function MapUI() {
             id: "base-raster",
             type: "raster",
             source: "satellite",
-            paint: { "raster-saturation": -0.3, "raster-brightness-min": 0.05 },
+            paint: {
+              "raster-saturation": -0.3,
+              "raster-brightness-min": 0.05,
+            },
           },
         ],
       },
@@ -105,11 +168,10 @@ export default function MapUI() {
     });
 
     mapRef.current = map;
-
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
 
     map.on("load", () => {
-      // Radius fill
+      // Keep your radius/crosshair/center layers if you want the UI visuals
       map.addSource(SOURCE_ID, { type: "geojson", data: turf.featureCollection([]) });
       map.addLayer({
         id: FILL_LAYER_ID,
@@ -129,7 +191,6 @@ export default function MapUI() {
         },
       });
 
-      // Crosshair lines
       map.addSource(CROSSHAIR_SOURCE_ID, { type: "geojson", data: turf.featureCollection([]) });
       map.addLayer({
         id: CROSSHAIR_LAYER_H,
@@ -138,8 +199,14 @@ export default function MapUI() {
         filter: ["==", "$type", "LineString"],
         paint: { "line-color": PRIMARY, "line-width": 1, "line-opacity": 0.5, "line-dasharray": [3, 2] },
       });
+      map.addLayer({
+        id: CROSSHAIR_LAYER_V,
+        type: "line",
+        source: CROSSHAIR_SOURCE_ID,
+        filter: ["==", "$type", "LineString"],
+        paint: { "line-color": PRIMARY, "line-width": 1, "line-opacity": 0.5, "line-dasharray": [3, 2] },
+      });
 
-      // Center point
       map.addSource(CENTER_SOURCE_ID, { type: "geojson", data: turf.featureCollection([]) });
       map.addLayer({
         id: CENTER_LAYER_ID,
@@ -154,9 +221,9 @@ export default function MapUI() {
         },
       });
 
+      // Optional: keep click for showing radius only (NOT used for overlays)
       map.on("click", (e) => {
-        const lngLat = [e.lngLat.lng, e.lngLat.lat];
-        setCenterLngLat(lngLat);
+        setCenterLngLat([e.lngLat.lng, e.lngLat.lat]);
       });
 
       map.on("mousemove", (e) => {
@@ -168,12 +235,18 @@ export default function MapUI() {
       setMapLoaded(true);
     });
 
-    return () => { map.remove(); mapRef.current = null; };
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ---- city flyTo ----
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
+
     setFlyingTo(true);
     map.flyTo({
       center: selectedCity.center,
@@ -182,11 +255,12 @@ export default function MapUI() {
       curve: 1.4,
       essential: true,
     });
-    setCenterLngLat(null);
+
     const timer = setTimeout(() => setFlyingTo(false), 1800);
     return () => clearTimeout(timer);
-  }, [selectedCityKey]);
+  }, [selectedCityKey, selectedCity.center, selectedCity.zoom]);
 
+  // ---- draw radius/crosshair (UI only) ----
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
@@ -205,9 +279,78 @@ export default function MapUI() {
 
     radiusSource.setData(makeCircleGeoJSON(centerLngLat, radiusMeters));
     centerSource.setData(turf.point(centerLngLat));
+
     const ch = makeCrosshair(centerLngLat, radiusMeters);
     crosshairSource.setData(turf.featureCollection([ch.h, ch.v]));
   }, [centerLngLat, radiusMeters, mapLoaded]);
+
+  // ✅ NEW: load all overlays whenever city changes
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    let cancelled = false;
+
+    async function loadAllOverlays() {
+      try {
+        setLoading(true);
+        setError("");
+
+        clearOverlays(map);
+
+        console.log("Loading overlays for city:", selectedCityKey);
+
+        const res = await fetch(`${backendBase}/api/overlays?city_key=${selectedCityKey}`);
+        console.log("overlay status:", res.status);
+
+        if (!res.ok) throw new Error(`overlay endpoint failed: ${res.status}`);
+
+        const json = await res.json();
+        console.log("overlay json:", json);
+
+        const results = json?.results || [];
+        if (!results.length) {
+          setError("No overlays returned for this city.");
+          return;
+        }
+
+        // Fit bounds to ALL overlays
+        let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+        for (const r of results) {
+          const b = r.bbox_ll;
+          if (!b || b.length !== 4) continue;
+          minLon = Math.min(minLon, b[0]);
+          minLat = Math.min(minLat, b[1]);
+          maxLon = Math.max(maxLon, b[2]);
+          maxLat = Math.max(maxLat, b[3]);
+        }
+        if (Number.isFinite(minLon)) {
+          map.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 70 });
+        }
+
+        // Add every overlay
+        results.forEach((r, i) => {
+          if (!r?.overlay_url || !r?.bbox_ll) return;
+          const layerId = `pred-overlay-${i}`;
+          const overlayUrl = `${backendBase}${r.overlay_url}`;
+          addOrUpdateImageOverlay(map, layerId, overlayUrl, r.bbox_ll, 0.65);
+        });
+
+        if (!cancelled) {
+          console.log(`Added ${results.length} overlays.`);
+        }
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setError(String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    loadAllOverlays();
+
+    return () => { cancelled = true; };
+  }, [selectedCityKey, mapLoaded]);
 
   return (
     <div style={s.root}>
@@ -217,11 +360,7 @@ export default function MapUI() {
       <header style={s.header}>
         <div style={s.headerLeft}>
           <div style={s.logo}>
-            <img
-              src={BenjiLotsCar}
-              alt="BenjiLots"
-              style={{ width: 130, height: 80, display: "block" }}
-            />
+            <img src={BenjiLotsCar} alt="BenjiLots" style={{ width: 130, height: 80, display: "block" }} />
           </div>
           <div>
             <div style={s.appTitle}>BENJI LOTS</div>
@@ -248,6 +387,7 @@ export default function MapUI() {
 
         <div style={s.statusBar}>
           {flyingTo && <span style={s.flyingBadge}>NAVIGATING</span>}
+          {loading && <span style={s.flyingBadge}>LOADING</span>}
           {hoverLngLat && (
             <span style={s.coordReadout}>
               {hoverLngLat[1].toFixed(5)}°N · {Math.abs(hoverLngLat[0]).toFixed(5)}°W
@@ -255,6 +395,8 @@ export default function MapUI() {
           )}
         </div>
       </header>
+
+      {error && <div style={{ marginTop: 6, color: "#ff6b35", fontSize: 11, paddingLeft: 14 }}>{error}</div>}
 
       {/* Map */}
       <div style={s.mapWrap}>
@@ -264,15 +406,15 @@ export default function MapUI() {
         <div style={s.scanlines} />
 
         {/* Corner reticles */}
-        <div style={{...s.reticle, top: 12, left: 12, borderTop: `2px solid ${PRIMARY}`, borderLeft: `2px solid ${PRIMARY}`}} />
-        <div style={{...s.reticle, top: 12, right: 12, borderTop: `2px solid ${PRIMARY}`, borderRight: `2px solid ${PRIMARY}`}} />
-        <div style={{...s.reticle, bottom: 12, left: 12, borderBottom: `2px solid ${PRIMARY}`, borderLeft: `2px solid ${PRIMARY}`}} />
-        <div style={{...s.reticle, bottom: 12, right: 12, borderBottom: `2px solid ${PRIMARY}`, borderRight: `2px solid ${PRIMARY}`}} />
+        <div style={{ ...s.reticle, top: 12, left: 12, borderTop: `2px solid ${PRIMARY}`, borderLeft: `2px solid ${PRIMARY}` }} />
+        <div style={{ ...s.reticle, top: 12, right: 12, borderTop: `2px solid ${PRIMARY}`, borderRight: `2px solid ${PRIMARY}` }} />
+        <div style={{ ...s.reticle, bottom: 12, left: 12, borderBottom: `2px solid ${PRIMARY}`, borderLeft: `2px solid ${PRIMARY}` }} />
+        <div style={{ ...s.reticle, bottom: 12, right: 12, borderBottom: `2px solid ${PRIMARY}`, borderRight: `2px solid ${PRIMARY}` }} />
 
-        {/* Side panel */}
+        {/* Side panel (kept, but RUN button removed) */}
         <div style={s.panel}>
           <div style={s.panelSection}>
-            <div style={s.panelLabel}>RADIUS</div>
+            <div style={s.panelLabel}>RADIUS (UI ONLY)</div>
             <div style={s.radiusDisplay}>
               <span style={s.radiusBig}>{radiusLabel}</span>
             </div>
@@ -287,6 +429,7 @@ export default function MapUI() {
               style={s.slider}
               className="radius-slider"
             />
+
             <div style={s.sliderTicks}>
               <span>50m</span>
               <span>1km</span>
@@ -307,7 +450,7 @@ export default function MapUI() {
           <div style={s.divider} />
 
           <div style={s.panelSection}>
-            <div style={s.panelLabel}>CENTER POINT</div>
+            <div style={s.panelLabel}>CENTER POINT (UI ONLY)</div>
             {centerLngLat ? (
               <div style={s.coordBlock}>
                 <div style={s.coordRow}>
@@ -325,7 +468,7 @@ export default function MapUI() {
             ) : (
               <div style={s.hint}>
                 <div style={s.hintIcon}>+</div>
-                <div style={s.hintText}>Click anywhere on the map to drop a pin and draw a radius.</div>
+                <div style={s.hintText}>Click anywhere on the map (optional) to draw the UI radius.</div>
               </div>
             )}
           </div>
@@ -335,6 +478,7 @@ export default function MapUI() {
   );
 }
 
+/* --- styles unchanged from your file --- */
 const s = {
   root: {
     height: "100vh",
@@ -357,27 +501,10 @@ const s = {
     flexShrink: 0,
     zIndex: 10,
   },
-  headerLeft: {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-  },
-  logo: {
-    opacity: 0.9,
-  },
-  appTitle: {
-    fontSize: 15,
-    fontWeight: 700,
-    letterSpacing: 5,
-    color: PRIMARY,
-  },
-  appSub: {
-    fontSize: 9,
-    letterSpacing: 2,
-    opacity: 0.5,
-    marginTop: 1,
-    textTransform: "uppercase",
-  },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12 },
+  logo: { opacity: 0.9 },
+  appTitle: { fontSize: 15, fontWeight: 700, letterSpacing: 5, color: PRIMARY },
+  appSub: { fontSize: 9, letterSpacing: 2, opacity: 0.5, marginTop: 1, textTransform: "uppercase" },
   cityToggle: {
     display: "flex",
     gap: 4,
@@ -399,28 +526,10 @@ const s = {
     gap: 1,
     transition: "all 0.15s",
   },
-  cityBtnActive: {
-    background: PRIMARY_DIM,
-    border: `1px solid rgba(0, 212, 255, 0.4)`,
-    color: PRIMARY,
-  },
-  cityAbbr: {
-    fontSize: 12,
-    fontWeight: 700,
-    letterSpacing: 2,
-  },
-  cityName: {
-    fontSize: 8,
-    letterSpacing: 1,
-    opacity: 0.7,
-  },
-  statusBar: {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-    minWidth: 280,
-    justifyContent: "flex-end",
-  },
+  cityBtnActive: { background: PRIMARY_DIM, border: `1px solid rgba(0, 212, 255, 0.4)`, color: PRIMARY },
+  cityAbbr: { fontSize: 12, fontWeight: 700, letterSpacing: 2 },
+  cityName: { fontSize: 8, letterSpacing: 1, opacity: 0.7 },
+  statusBar: { display: "flex", alignItems: "center", gap: 12, minWidth: 280, justifyContent: "flex-end" },
   flyingBadge: {
     fontSize: 9,
     letterSpacing: 3,
@@ -430,35 +539,18 @@ const s = {
     borderRadius: 2,
     animation: "pulse 0.8s ease-in-out infinite",
   },
-  coordReadout: {
-    fontSize: 10,
-    letterSpacing: 1,
-    color: "rgba(200, 221, 232, 0.45)",
-    fontVariantNumeric: "tabular-nums",
-  },
-  mapWrap: {
-    flex: 1,
-    position: "relative",
-    overflow: "hidden",
-  },
-  map: {
-    position: "absolute",
-    inset: 0,
-  },
+  coordReadout: { fontSize: 10, letterSpacing: 1, color: "rgba(200, 221, 232, 0.45)", fontVariantNumeric: "tabular-nums" },
+  mapWrap: { flex: 1, position: "relative", overflow: "hidden" },
+  map: { position: "absolute", inset: 0 },
   scanlines: {
     position: "absolute",
     inset: 0,
-    background: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px)",
+    background:
+      "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px)",
     pointerEvents: "none",
     zIndex: 1,
   },
-  reticle: {
-    position: "absolute",
-    width: 18,
-    height: 18,
-    zIndex: 2,
-    opacity: 0.6,
-  },
+  reticle: { position: "absolute", width: 18, height: 18, zIndex: 2, opacity: 0.6 },
   panel: {
     position: "absolute",
     top: 16,
@@ -471,75 +563,19 @@ const s = {
     backdropFilter: "blur(12px)",
     overflow: "hidden",
   },
-  panelSection: {
-    padding: "14px 16px",
-  },
-  panelLabel: {
-    fontSize: 8,
-    letterSpacing: 3,
-    color: "rgba(0, 212, 255, 0.5)",
-    marginBottom: 10,
-    textTransform: "uppercase",
-  },
-  radiusDisplay: {
-    marginBottom: 12,
-  },
-  radiusBig: {
-    fontSize: 32,
-    fontWeight: 700,
-    color: PRIMARY,
-    letterSpacing: -1,
-    fontVariantNumeric: "tabular-nums",
-  },
-  slider: {
-    width: "100%",
-    accentColor: PRIMARY,
-    cursor: "pointer",
-  },
-  sliderTicks: {
-    display: "flex",
-    justifyContent: "space-between",
-    fontSize: 8,
-    letterSpacing: 0.5,
-    opacity: 0.4,
-    marginTop: 4,
-  },
-  divider: {
-    height: 1,
-    background: "rgba(0, 212, 255, 0.12)",
-    margin: "0 16px",
-  },
-  statRow: {
-    display: "flex",
-    alignItems: "baseline",
-    gap: 6,
-  },
-  statVal: {
-    fontSize: 18,
-    fontWeight: 700,
-    color: "rgba(200, 221, 232, 0.85)",
-    fontVariantNumeric: "tabular-nums",
-  },
-  coordBlock: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-  },
-  coordRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  coordKey: {
-    fontSize: 9,
-    letterSpacing: 2,
-    color: "rgba(0, 212, 255, 0.5)",
-  },
-  coordVal: {
-    fontSize: 11,
-    fontVariantNumeric: "tabular-nums",
-    color: "rgba(200, 221, 232, 0.9)",
-  },
+  panelSection: { padding: "14px 16px" },
+  panelLabel: { fontSize: 8, letterSpacing: 3, color: "rgba(0, 212, 255, 0.5)", marginBottom: 10, textTransform: "uppercase" },
+  radiusDisplay: { marginBottom: 12 },
+  radiusBig: { fontSize: 32, fontWeight: 700, color: PRIMARY, letterSpacing: -1, fontVariantNumeric: "tabular-nums" },
+  slider: { width: "100%", accentColor: PRIMARY, cursor: "pointer" },
+  sliderTicks: { display: "flex", justifyContent: "space-between", fontSize: 8, letterSpacing: 0.5, opacity: 0.4, marginTop: 4 },
+  divider: { height: 1, background: "rgba(0, 212, 255, 0.12)", margin: "0 16px" },
+  statRow: { display: "flex", alignItems: "baseline", gap: 6 },
+  statVal: { fontSize: 18, fontWeight: 700, color: "rgba(200, 221, 232, 0.85)", fontVariantNumeric: "tabular-nums" },
+  coordBlock: { display: "flex", flexDirection: "column", gap: 6 },
+  coordRow: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  coordKey: { fontSize: 9, letterSpacing: 2, color: "rgba(0, 212, 255, 0.5)" },
+  coordVal: { fontSize: 11, fontVariantNumeric: "tabular-nums", color: "rgba(200, 221, 232, 0.9)" },
   clearBtn: {
     marginTop: 10,
     width: "100%",
@@ -553,36 +589,9 @@ const s = {
     borderRadius: 2,
     transition: "all 0.15s",
   },
-  hint: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: 8,
-    padding: "8px 0",
-    opacity: 0.6,
-  },
-  hintIcon: {
-    fontSize: 28,
-    color: PRIMARY,
-    lineHeight: 1,
-    opacity: 0.4,
-  },
-  hintText: {
-    fontSize: 10,
-    textAlign: "center",
-    lineHeight: 1.5,
-    letterSpacing: 0.3,
-    opacity: 0.7,
-  },
-  attribution: {
-    position: "absolute",
-    bottom: 8,
-    right: 8,
-    fontSize: 9,
-    opacity: 0.35,
-    zIndex: 5,
-    letterSpacing: 0.5,
-  },
+  hint: { display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: "8px 0", opacity: 0.6 },
+  hintIcon: { fontSize: 28, color: PRIMARY, lineHeight: 1, opacity: 0.4 },
+  hintText: { fontSize: 10, textAlign: "center", lineHeight: 1.5, letterSpacing: 0.3, opacity: 0.7 },
 };
 
 const css = `
