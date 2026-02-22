@@ -74,7 +74,7 @@ def collate_fn(batch):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-root_dir = "downtown_cookeville_tdot"
+root_dir = "downtown_nashville_2023"
 
 test_dataset = EvalDataset(root_dir, feature_extractor)
 
@@ -96,6 +96,8 @@ model.eval()
 
 
 with torch.no_grad():
+    output_dir = "nash_data"
+    os.makedirs(output_dir, exist_ok=True)
     for example in test_dataset:
         # Get the input tensor and move to device
         pixel_values = example["pixel_values"].to(device)  # (1, C, H, W) if already unsqueezed
@@ -117,22 +119,29 @@ with torch.no_grad():
         parking_mask = (pred_class == PARKING_CLASS_ID).astype(np.uint8) * 255  # (H, W)
 
         # Overlay mask on original image
+        image_dir = os.path.join(output_dir, example['image_name'])
+        os.makedirs(image_dir, exist_ok=True)
+
         mask_l = Image.fromarray(parking_mask).convert("L")
+        mask_file = os.path.join(image_dir, "mask.png")
+        mask_l.save(mask_file)
+        print(f"Saved raw mask -> {mask_file}")
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+            image = image.convert("RGB")
+
+        # Save original image
+        image_file = os.path.join(image_dir, "original.png")
+        image.save(image_file)
+        print(f"Saved original image -> {image_file}")
         red = Image.new("RGB", image.size, (255, 0, 0))
         overlay = Image.composite(red, image, mask_l)
         blended = Image.blend(image, overlay, alpha=0.3)
 
         # Save overlay
-        #blended.save(f"parking_overlay_{example['image_name']}.png")
-
-        # Optional: plot
-        plt.figure(figsize=(6,6))
-        plt.imshow(blended)
-        plt.axis("off")
-        plt.title(f"Parking Mask Overlay {example['image_name']}")
-        plt.show()
-        plt.close()
-
+        overlay_file = os.path.join(image_dir, "overlay.png")
+        blended.save(overlay_file)
+        print(f"Saved blended overlay -> {overlay_file}")
         # Append results
         results.append({
             "image_name": example["image_name"],
@@ -145,6 +154,6 @@ with torch.no_grad():
             "parking_mask_flat": parking_mask.flatten().tolist()
         })
 
-df = pd.DataFrame(results)
-df.to_csv("inference_parking_masks_cook.csv", index=False)
+#df = pd.DataFrame(results)
+#df.to_csv("inference_parking_masks_cook.csv", index=False)
 print("Done")
