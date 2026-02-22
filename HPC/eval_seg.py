@@ -89,94 +89,9 @@ with torch.no_grad():
 
         all_preds.append(preds.cpu())
         all_labels.append(labels.cpu())
-        
-        preds_cpu = preds.cpu().numpy()  # [B,H,W]
-        batch_stats = []
-        all_stats = []
-
-        for pred_mask in preds_cpu:
-            lot_mask = (pred_mask == 1).astype(np.uint8)
-        
-            num_lots, lot_labels = cv2.connectedComponents(lot_mask)
-            lots = [lot_labels == i for i in range(1, num_lots)]
-            
-            overlay_img = cv2.cvtColor(lot_mask, cv2.COLOR_GRAY2BGR)
-
-            spots_per_lot = []
-            spots_coords_per_lot = []
-
-            for lot in lots:
-                lot_uint8 = lot.astype(np.uint8) * 255
-                # distance transform
-                blurred = cv2.GaussianBlur(lot_uint8, (5,5), 0)
-                edges = cv2.Canny(blurred, threshold1=50, threshold2=150)
-                lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=20,
-                                minLineLength=10, maxLineGap=5)
-                if lines is None or len(lines) < 50:
-                    # fallback: use area formula or distance transform
-                    distance = ndimage.distance_transform_edt(lot)
-                    coords = peak_local_max(distance, min_distance=min_distance)
-                    spot_count = len(coords)
-                else:
-                    # crude estimate: one spot per 2 lines
-                    spot_count = len(lines) // 2
-                    coords = []
-
-                spots_per_lot.append(spot_count)
-                spots_coords_per_lot.append(coords)
-
-                contours, _ = cv2.findContours(lot_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(overlay_img, contours, -1, (0,255,0), 2)
-                for y, x in coords:
-                    cv2.circle(overlay_img, (x,y), 3, (0,0,255), -1)
-                
-                stats = {
-                    "num_lots": len(lots),
-                    "spots_per_lot": spots_per_lot,
-                    "total_spots": sum(spots_per_lot),
-                    "spots_coords_per_lot": [c.tolist() for c in spots_coords_per_lot]
-                }
-                
-                all_stats.append({
-                    "stats": stats,
-                    "pred_mask": pred_mask.tolist()  # store as list for JSON compatibility
-                })
-
-            batch_stats.append({
-                "num_lots": len(lots),
-                "spots_per_lot": spots_per_lot,
-                "total_spots": sum(spots_per_lot)
-            })
-
-            lot_stats_per_image.extend(batch_stats)
 
 all_preds = torch.cat(all_preds, dim=0)
 all_labels = torch.cat(all_labels, dim=0)
-
-output_dir = "parking_overlays"
-os.makedirs(output_dir, exist_ok=True)
-
-for i, item in enumerate(all_stats[:10]):
-    stats = item["stats"]
-    pred_mask = np.array(item["pred_mask"], dtype=np.uint8)  # convert list back to np.array
-
-    # 1️⃣ Save mask as PNG (1 = parking lot)
-    mask_file = os.path.join(output_dir, f"image_{i}_pred_mask.png")
-    cv2.imwrite(mask_file, pred_mask * 255)  # scale to 0-255
-    print(f"Saved predicted mask for Image {i} -> {mask_file}")
-
-    # 2️⃣ Save stats separately as JSON
-    stats_file = os.path.join(output_dir, f"image_{i}_stats.json")
-    with open(stats_file, "w") as f:
-        json.dump(stats, f, indent=4)
-    print(f"Saved stats for Image {i} -> {stats_file}")
-
-    # 3️⃣ Optional: preview with matplotlib (terminal-friendly)
-    plt.figure(figsize=(5,5))
-    plt.title(f"Image {i} Pred Mask")
-    plt.imshow(pred_mask, cmap='gray')
-    plt.axis('off')
-    plt.show()
 
 def compute_iou(preds, labels, num_classes):
     ious = []
